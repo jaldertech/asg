@@ -10,6 +10,7 @@ from unittest.mock import patch, mock_open, MagicMock
 from asg.scrub_controller import (
     get_load_average,
     is_system_busy,
+    run_scrub,
 )
 from asg import config
 
@@ -175,6 +176,55 @@ class TestSystemBusyRunningMode(unittest.TestCase):
         busy, reason = is_system_busy()
         self.assertTrue(busy)
         self.assertIn("load average", reason)
+
+
+class TestRunScrubResumeDecision(unittest.TestCase):
+    """
+    Regression: the monitor loop must take the RESUME decision (while the
+    scrub is paused) in pre-flight mode, not running mode. A paused scrub
+    contributes no load of its own, so the elevated running threshold would
+    let mid-range external load read as idle, resume the scrub, and thrash.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _init_test_config()
+
+    @patch("asg.scrub_controller.notifier")
+    @patch("asg.scrub_controller.time.sleep")
+    @patch("asg.scrub_controller._scrub_cancel", return_value=True)
+    @patch("asg.scrub_controller._scrub_start", return_value=True)
+    @patch("asg.scrub_controller._scrub_status")
+    @patch("asg.scrub_controller.is_system_busy")
+    @patch("asg.scrub_controller.require_pool")
+    @patch("asg.scrub_controller.get_pool_mount", return_value="/mnt/media_pool")
+    def test_resume_checks_run_in_preflight_mode(
+        self, _mount, _require, mock_busy, mock_status, _start, _cancel,
+        _sleep, _notifier,
+    ):
+        mock_status.return_value = {"running": True, "raw": "", "errors": 0}
+
+        monitor_flags = []
+
+        def busy(*_args, running=None, **_kw):
+            # Pre-flight calls pass no `running` kwarg — let the scrub start.
+            if running is None:
+                return (False, "")
+            monitor_flags.append(running)
+            step = len(monitor_flags)
+            if step == 1:
+                return (True, "load average 8.00 exceeds threshold 7.0")  # pause
+            if step == 2:
+                return (False, "")  # resume (no debounce in this version)
+            raise RuntimeError("stop monitor loop")
+
+        mock_busy.side_effect = busy
+
+        with self.assertRaises(RuntimeError):
+            run_scrub()
+
+        self.assertIs(monitor_flags[0], True)   # active -> tolerant
+        self.assertIs(monitor_flags[1], False)  # paused -> sensitive resume gate
 
 
 class TestThresholdDefaults(unittest.TestCase):

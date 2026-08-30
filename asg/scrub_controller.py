@@ -292,10 +292,12 @@ def run_scrub(dry_run: bool = False) -> None:
             _log("Scrub has finished.")
             break
 
-        # running=True: a scrub is in progress, so judge contention by the
-        # elevated load threshold and pool write IOPS rather than signals
-        # the scrub's own sequential reads dominate.
-        busy, reason = is_system_busy(running=True)
+        # running reflects whether the scrub's own footprint is present in
+        # the readings now. While it runs (scrub_paused False) use the
+        # elevated load threshold and pool write IOPS so it does not trip on
+        # itself; while it is paused the scrub adds nothing, so the resume
+        # decision uses the same pre-flight thresholds as the initial start.
+        busy, reason = is_system_busy(running=not scrub_paused)
 
         if busy and not scrub_paused:
             _log(f"Throttling: pausing scrub — {reason}")
