@@ -108,8 +108,10 @@ pool:
   # uuid: "optional-pin-for-safety"
 
 scrub:
-  load_threshold: 3.0           # Pause scrub above this 1-min load average
-  io_threshold_percent: 40.0    # Pause if any drive exceeds this I/O %
+  load_threshold: 3.0           # Pre-flight: don't start/resume above this 1-min load average
+  io_threshold_percent: 40.0    # Pre-flight: don't start/resume if any drive exceeds this I/O %
+  load_threshold_running: 7.0   # Running: pause an in-progress scrub above this load average
+  write_iops_threshold: 600.0   # Running: pause an in-progress scrub above this pool write IOPS
 
 capacity:
   chunk_fullness_warn_percent: 90.0

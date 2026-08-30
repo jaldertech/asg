@@ -107,6 +107,76 @@ class TestSystemBusy(unittest.TestCase):
         self.assertTrue(busy)
 
 
+class TestSystemBusyRunningMode(unittest.TestCase):
+    """
+    is_system_busy(running=True), used while a scrub is already in progress.
+    The scrub's own load and device utilisation must not pause it — only the
+    elevated load threshold or genuine pool write load may.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _init_test_config()
+
+    @patch("asg.scrub_controller.get_pool_write_iops")
+    @patch("asg.scrub_controller.get_io_utilisation")
+    @patch("asg.scrub_controller.get_load_average")
+    def test_running_tolerates_scrub_own_footprint(self, mock_load, mock_io, mock_wiops):
+        """Scrub-baseline load + saturated read I/O + no writes => not busy."""
+        mock_load.return_value = 5.3
+        mock_io.return_value = {"sdc": 98.0, "sdd": 97.0}
+        mock_wiops.return_value = 0.0
+        busy, reason = is_system_busy(running=True)
+        self.assertFalse(busy, reason)
+
+    @patch("asg.scrub_controller.get_pool_write_iops")
+    @patch("asg.scrub_controller.get_io_utilisation")
+    @patch("asg.scrub_controller.get_load_average")
+    def test_running_still_pauses_on_real_load(self, mock_load, mock_io, mock_wiops):
+        """Load above the elevated running threshold still pauses the scrub."""
+        mock_load.return_value = config.get()["scrub"]["load_threshold_running"] + 0.5
+        mock_io.return_value = {"sdc": 10.0}
+        mock_wiops.return_value = 0.0
+        busy, reason = is_system_busy(running=True)
+        self.assertTrue(busy)
+        self.assertIn("load average", reason)
+
+    @patch("asg.scrub_controller.get_pool_write_iops")
+    @patch("asg.scrub_controller.get_io_utilisation")
+    @patch("asg.scrub_controller.get_load_average")
+    def test_running_pauses_on_write_load(self, mock_load, mock_io, mock_wiops):
+        """Sustained pool writes (genuine external load) pause the scrub."""
+        mock_load.return_value = 2.0
+        mock_io.return_value = {"sdc": 40.0}
+        mock_wiops.return_value = config.get()["scrub"]["write_iops_threshold"] + 100
+        busy, reason = is_system_busy(running=True)
+        self.assertTrue(busy)
+        self.assertIn("write load", reason)
+
+    @patch("asg.scrub_controller.get_pool_write_iops")
+    @patch("asg.scrub_controller.get_io_utilisation")
+    @patch("asg.scrub_controller.get_load_average")
+    def test_running_does_not_consult_io_utilisation(self, mock_load, mock_io, mock_wiops):
+        """The per-device io_util check is skipped entirely while running."""
+        mock_load.return_value = 1.0
+        mock_io.side_effect = AssertionError(
+            "get_io_utilisation must not be called while a scrub is running"
+        )
+        mock_wiops.return_value = 5.0
+        busy, _reason = is_system_busy(running=True)
+        self.assertFalse(busy)
+
+    @patch("asg.scrub_controller.get_io_utilisation")
+    @patch("asg.scrub_controller.get_load_average")
+    def test_preflight_mode_unchanged(self, mock_load, mock_io):
+        """Regression: default (pre-flight) mode keeps the sensitive threshold."""
+        mock_load.return_value = config.get()["scrub"]["load_threshold"] + 0.1
+        mock_io.return_value = {"sdc": 0.0}
+        busy, reason = is_system_busy()
+        self.assertTrue(busy)
+        self.assertIn("load average", reason)
+
+
 class TestThresholdDefaults(unittest.TestCase):
     """Verify default thresholds are sensible."""
 
@@ -123,6 +193,21 @@ class TestThresholdDefaults(unittest.TestCase):
         cfg = config.get()
         self.assertGreaterEqual(cfg["scrub"]["io_threshold_percent"], 10.0)
         self.assertLessEqual(cfg["scrub"]["io_threshold_percent"], 80.0)
+
+    def test_running_load_threshold_clears_preflight(self):
+        cfg = config.get()
+        self.assertGreater(
+            cfg["scrub"]["load_threshold_running"], cfg["scrub"]["load_threshold"]
+        )
+
+    def test_running_load_threshold_sane_for_four_cores(self):
+        cfg = config.get()
+        self.assertGreaterEqual(cfg["scrub"]["load_threshold_running"], 5.0)
+        self.assertLessEqual(cfg["scrub"]["load_threshold_running"], 12.0)
+
+    def test_write_iops_threshold_positive(self):
+        cfg = config.get()
+        self.assertGreater(cfg["scrub"]["write_iops_threshold"], 0.0)
 
     def test_poll_interval_not_too_aggressive(self):
         cfg = config.get()

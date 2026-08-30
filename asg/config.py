@@ -28,6 +28,8 @@ _DEFAULTS = {
     "scrub": {
         "load_threshold": 3.0,
         "io_threshold_percent": 40.0,
+        "load_threshold_running": 7.0,
+        "write_iops_threshold": 600.0,
         "poll_interval_seconds": 30,
         "grace_period_seconds": 60,
     },
