@@ -103,20 +103,71 @@ def get_io_utilisation(interval: float = 2.0) -> dict[str, float]:
     return util
 
 
-def is_system_busy() -> tuple[bool, str]:
+def get_pool_write_iops(interval: float = 2.0) -> float:
+    """
+    Aggregate WRITE IOPS across the pool devices over *interval* seconds.
+
+    A BTRFS scrub is sequential-read-only except for rare checksum repair,
+    so sustained writes to the pool devices are a reliable signal of genuine
+    external load (file writes, moves, backups). This is used instead of
+    total device-busy time while a scrub is running, because io_ticks is
+    then dominated by the scrub's own reads and cannot distinguish it from
+    real contention.
+    """
+    before = _read_diskstats()
+    time.sleep(interval)
+    after = _read_diskstats()
+
+    if interval <= 0:
+        return 0.0
+
+    total_writes = 0
+    for name in before:
+        if name in after:
+            total_writes += after[name]["write_ios"] - before[name]["write_ios"]
+
+    return round(total_writes / interval, 1)
+
+
+def is_system_busy(running: bool = False) -> tuple[bool, str]:
     """
     Determine whether the system is too busy for scrubbing.
 
     Returns (is_busy, reason_string).
-    """
-    cfg = config.get()
-    load_threshold = cfg["scrub"]["load_threshold"]
-    io_threshold = cfg["scrub"]["io_threshold_percent"]
 
+    When *running* is False (pre-flight, before a scrub is started or
+    resumed) the scrub has no footprint yet, so absolute load average and
+    per-device I/O utilisation are valid signals of existing activity.
+
+    When *running* is True (a scrub is already in progress) those signals
+    are dominated by the scrub itself — its per-device checksum-verification
+    kworkers each add roughly 1.0 to load average, and its sequential reads
+    keep the pool devices busy — so an elevated load threshold and pool
+    WRITE IOPS are used instead. Applying the pre-flight thresholds mid-run
+    makes the controller cancel the scrub in response to its own load,
+    producing a cancel/resume thrash loop.
+    """
+    scrub_cfg = config.get()["scrub"]
+
+    load_threshold = (
+        scrub_cfg["load_threshold_running"] if running
+        else scrub_cfg["load_threshold"]
+    )
     load = get_load_average()
     if load > load_threshold:
         return True, f"load average {load:.2f} exceeds threshold {load_threshold}"
 
+    if running:
+        write_threshold = scrub_cfg["write_iops_threshold"]
+        write_iops = get_pool_write_iops(interval=2.0)
+        if write_iops > write_threshold:
+            return True, (
+                f"pool write load {write_iops:.0f} IOPS exceeds threshold "
+                f"{write_threshold:.0f} IOPS"
+            )
+        return False, ""
+
+    io_threshold = scrub_cfg["io_threshold_percent"]
     io_util = get_io_utilisation(interval=2.0)
     for device, pct in io_util.items():
         if pct > io_threshold:
@@ -241,7 +292,12 @@ def run_scrub(dry_run: bool = False) -> None:
             _log("Scrub has finished.")
             break
 
-        busy, reason = is_system_busy()
+        # running reflects whether the scrub's own footprint is present in
+        # the readings now. While it runs (scrub_paused False) use the
+        # elevated load threshold and pool write IOPS so it does not trip on
+        # itself; while it is paused the scrub adds nothing, so the resume
+        # decision uses the same pre-flight thresholds as the initial start.
+        busy, reason = is_system_busy(running=not scrub_paused)
 
         if busy and not scrub_paused:
             _log(f"Throttling: pausing scrub — {reason}")

@@ -15,18 +15,37 @@ pool:
   # uuid: ""                  # Optional. If set, must match the mounted UUID.
 
 # ── Scrub Throttling ────────────────────────────────────────────────
-# The scrub controller monitors system load and per-device I/O
-# utilisation. If either exceeds the threshold, the scrub is paused
-# until the system is idle again.
+# The scrub controller uses two sets of thresholds. The PRE-FLIGHT set
+# (load_threshold, io_threshold_percent) decides whether to start or
+# resume a scrub at all. The RUNNING set (load_threshold_running,
+# write_iops_threshold) decides whether to pause a scrub that is already
+# in progress: at that point load average and per-device I/O utilisation
+# are dominated by the scrub itself (its checksum-verification kworkers
+# add ~1.0 load per pool device, and its sequential reads keep the
+# drives busy), so the pre-flight thresholds would pause it immediately.
 scrub:
-  # 1-minute load average threshold. Pause scrub above this value.
-  # Set relative to your CPU core count (e.g. 3.0 for a 4-core Pi 5).
+  # PRE-FLIGHT. 1-minute load average above which a scrub will not be
+  # started or resumed. Set relative to your CPU core count
+  # (e.g. 3.0 for a 4-core Pi 5).
   load_threshold: 3.0
 
-  # Per-device I/O utilisation percentage. Pause if any pool drive
-  # exceeds this. Calculated from /proc/diskstats over a 2-second
-  # sample window.
+  # PRE-FLIGHT. Per-device I/O utilisation percentage; a scrub will not
+  # be started or resumed if any pool drive exceeds this. Calculated
+  # from /proc/diskstats over a 2-second sample window. Not applied
+  # while a scrub is running.
   io_threshold_percent: 40.0
+
+  # RUNNING. 1-minute load average above which an in-progress scrub is
+  # paused. Must clear the scrub's own baseline: roughly 1.0 per pool
+  # device (about 4-5 on a 4-drive pool), plus headroom for other work.
+  load_threshold_running: 7.0
+
+  # RUNNING. Aggregate WRITE IOPS across the pool devices above which an
+  # in-progress scrub is paused. A scrub is sequential-read-only (bar
+  # rare checksum repair), so sustained writes indicate genuine external
+  # load that total device-busy time cannot separate from the scrub's
+  # own reads.
+  write_iops_threshold: 600.0
 
   # How often (seconds) to re-check system load during a scrub.
   poll_interval_seconds: 30
